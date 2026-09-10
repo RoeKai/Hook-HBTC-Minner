@@ -13,9 +13,9 @@ jobs:
     timeout-minutes: 8
     env:
       BASE: 835fc653e171a0be06d821a598312ff9efbf8ccc
-      COMMENT_ID: '5615978555'
-      PATCH_SHA256: 629ee93dda1533cc7f1e1842e669f9d707c765d503d035c9b8a31de9ec13ffb3
-      PATCH_BYTES: '9801'
+      COMMENT_ID: '5626585775'
+      PATCH_SHA256: d09d4ce1b302c7efb24d434281ddbe56dcd2d253619397b67fe78fde1f265aaf
+      PATCH_BYTES: '12329'
     steps:
       - name: Retrieve exact public patch with no repository credentials
         shell: bash
@@ -23,7 +23,7 @@ jobs:
           set -euo pipefail
           mkdir evidence
           git init source
-          git -C source fetch --depth=4 https://github.com/RoeKai/Hook-HBTC-Minner.git "$GITHUB_SHA"
+          git -C source fetch --depth=5 https://github.com/RoeKai/Hook-HBTC-Minner.git "$GITHUB_SHA"
           git -C source checkout --detach FETCH_HEAD
           cp source/qa/pm-acceptance.test.ts evidence/pm-acceptance.test.ts
           git -C source checkout --detach "$BASE"
@@ -73,7 +73,7 @@ jobs:
           npm test 2>&1 | tee ../evidence/developer-tests.log
           npm run build 2>&1 | tee ../evidence/build.log
           git diff --check
-      - name: Run independent PM regressions
+      - name: Run independent PM regressions and integrated suite
         shell: bash
         run: |
           set -euo pipefail
@@ -84,7 +84,12 @@ jobs:
           rc=$?
           cat ../evidence/pm-tests.log
           printf '%s\n' "$rc" > ../evidence/pm-exit-code.txt
-          exit "$rc"
+          if test "$rc" -ne 0; then exit "$rc"; fi
+          set -e
+          npm run lint 2>&1 | tee ../evidence/integrated-lint.log
+          npm run typecheck 2>&1 | tee ../evidence/integrated-typecheck.log
+          npm test -- --reporter=json --outputFile=../evidence/integrated-results.json 2>&1 | tee ../evidence/integrated-tests.log
+          npm run build 2>&1 | tee ../evidence/integrated-build.log
       - name: Record dependency advisories without hiding them
         if: always()
         shell: bash
