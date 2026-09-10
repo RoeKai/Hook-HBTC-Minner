@@ -1,0 +1,144 @@
+import { describe, expect, it } from 'vitest';
+import { emissionAt, rewardAt, marginalRewards, selectCandidate, type Candidate, type DecisionInput } from './accumulation';
+import { validateStrategy, type StrategyConfig } from './strategy';
+
+const W = 10n ** 18n;
+const H = 21_000_000n * W;
+const T = 10_777_023_386_140_748n;
+const S = (H >> 1n) / 4320n;
+const ceil = (a: bigint, b: bigint) => (a + b - 1n) / b;
+const candidate = (p: Partial<Candidate> = {}): Candidate => ({ id: 'base', budget: T + 1000n, paid: T, refund: 1000n, work: T, gasWei: 1000n, claimGasWei: 200n, serviceCostNvda: 100n, ...p });
+const input = (p: Partial<DecisionInput> = {}): DecisionInput => ({ round:144, ownWork:0n, otherWorkScenarios:[0n], nvdaAvailable:10n*T, ethAvailable:10000n, perRoundCap:4n*T, dailyRemaining:10n*T, nvdaReserved:0n, ethReserved:0n, nvdaFeeReserve:0n, ethExitReserve:0n, costPerThousandCap:W, now:100, fx:{numerator:2n,denominator:3n,observedAt:100,maxAgeSeconds:30,source:'PM test fixture, not market data'}, candidates:[candidate()], ...p });
+const selected = (p: Partial<DecisionInput> = {}) => selectCandidate(input(p)).selected;
+const expectRejected = (p: Partial<DecisionInput>) => expect(selectCandidate(input(p)).action).not.toBe('PARTICIPATE');
+const oracle = (s:bigint,t:bigint,x:bigint,o:bigint) => x === 0n ? 0n : s*x/(t>o+x?t:o+x);
+
+describe('PM independent issuance and reward arithmetic', () => {
+  it.each([0,143,144,4319,4320,54*4320,71*4320,72*4320,96*4320,256*4320])('exact issuance round %s', r => {
+    const e=Math.floor(r/4320);
+    expect(emissionAt(r)).toEqual({epoch:e,public:r>=144,scheduled:e<96?(H>>BigInt(e+1))/4320n:0n,target:e<256?T>>BigInt(e):0n});
+  });
+  it.each([-1,NaN,Infinity,1.5,Number.MAX_SAFE_INTEGER+1])('rejects invalid round %s', r => expect(() => emissionAt(r)).toThrow());
+  it('retains default public epoch instead of resetting at round 144', () => expect(emissionAt(144).scheduled).toBe(S));
+  it('handles zero target and zero participation without division by zero', () => {
+    expect(rewardAt(1000n,0n,0n,0n)).toBe(0n);
+    expect(rewardAt(1000n,0n,10n,20n)).toBe(333n);
+  });
+  it('computes each marginal scenario before selecting minimum', () => {
+    expect(marginalRewards(1000n,100n,100n,10n,[0n,100n,1000n])).toEqual({values:[0n,23n,9n],low:0n,high:23n});
+  });
+  it('matches independent integer oracle across deterministic grid', () => {
+    for(const own of [0n,1n,100n,10n**24n]) for(const added of [0n,1n,100n,10n**20n]) {
+      const os=[0n,T,10n**27n];const values=os.map(o=>oracle(S,T,own+added,o)-oracle(S,T,own,o));
+      const expected={values,low:values.reduce((a,b)=>a<b?a:b),high:values.reduce((a,b)=>a>b?a:b)};
+      expect(marginalRewards(S,T,own,added,os)).toEqual(expected);
+    }
+  });
+  it('rejects empty/oversized competition arrays', () => {
+    expect(()=>marginalRewards(S,T,0n,1n,[])).toThrow();
+    expect(()=>marginalRewards(S,T,0n,1n,Array<bigint>(33).fill(0n))).toThrow();
+  });
+  it('rejects invalid raw reward inputs', () => {
+    expect(()=>rewardAt(-1n,T,0n,0n)).toThrow();
+    expect(()=>rewardAt(S,T,10 as unknown as bigint,0n)).toThrow();
+    expect(()=>marginalRewards(S,T,0n,-1n,[0n])).toThrow();
+  });
+});
+
+describe('PM independent candidate selection and asset budgets', () => {
+  it('selects a genuine positive candidate and does not require a selling price', () => {
+    const d=selectCandidate(input());expect(d.action).toBe('PARTICIPATE');
+    expect(d.selected?.rewardLow).toBe(S);expect(d.selected?.costNvda).toBe(T+900n);
+    expect(d.selected?.costPerThousand).toBe(ceil((T+900n)*1000n*W,S));
+    expect(d.assumptions.length).toBeGreaterThan(0);
+  });
+  it('does not pay more for saturated rewards', () => {
+    const d=selectCandidate(input({candidates:[candidate({id:'excess',budget:2n*T,paid:2n*T,refund:0n,work:2n*T}),candidate()]}));
+    expect(d.selected?.id).toBe('base');
+  });
+  it('uses cost then transfer budget then stable ID for a tie', () => {
+    const a=candidate({id:'a'}), z=candidate({id:'z'}),large=candidate({id:'0-large',budget:T+2000n,refund:2000n});
+    const d=selectCandidate(input({candidates:[z,large,a]}));expect(d.selected?.id).toBe('a');
+  });
+  it('enforces NVDA reservation including service payment exactly', () => {
+    const exact=T+1000n+100n+500n+600n;
+    expect(selected({nvdaAvailable:exact,nvdaReserved:500n,nvdaFeeReserve:600n})).not.toBeNull();
+    expectRejected({nvdaAvailable:exact-1n,nvdaReserved:500n,nvdaFeeReserve:600n});
+  });
+  it('uses paid plus service for daily spend, not refunded transfer amount', () => {
+    expect(selected({dailyRemaining:T+100n})).not.toBeNull();
+    expectRejected({dailyRemaining:T+99n});
+  });
+  it('enforces transfer-based per-round cap', () => {
+    expect(selected({perRoundCap:T+1000n})).not.toBeNull();
+    expectRejected({perRoundCap:T+999n});
+  });
+  it('reserves execution, claim and exit ETH separately from NVDA valuation', () => {
+    expect(selected({ethAvailable:1800n,ethReserved:300n,ethExitReserve:300n})).not.toBeNull();
+    expectRejected({ethAvailable:1799n,ethReserved:300n,ethExitReserve:300n});
+  });
+  it('charges paid only, not budget or a second Toll', () => {
+    const c=candidate({budget:T+5000n,refund:5000n});
+    expect(selected({candidates:[c]})?.costNvda).toBe(T+900n);
+  });
+  it('aggregates gas before rounding conversion upwards', () => {
+    const c=candidate({gasWei:1n,claimGasWei:1n,serviceCostNvda:0n});
+    expect(selected({candidates:[c],fx:{numerator:1n,denominator:3n,observedAt:100,maxAgeSeconds:30,source:'test'}})?.costNvda).toBe(T+1n);
+  });
+  it('compares cost cap without flooring away the threshold crossing', () => {
+    const cap=ceil((T+900n)*1000n*W,S);
+    expect(selected({costPerThousandCap:cap})).not.toBeNull();
+    expectRejected({costPerThousandCap:cap-1n});
+  });
+  it('refuses zero marginal tokens despite a large historical position', () => expectRejected({ownWork:T}));
+  it('uses all scenarios for conservative marginal quantity', () => {
+    const d=selectCandidate(input({ownWork:T,otherWorkScenarios:[0n,T,10n*T]}));expect(d.action).toBe('SKIP');
+  });
+  it.each([0,143,72*4320])('skips no public issuance at round %s', round => expect(selectCandidate(input({round})).action).toBe('SKIP'));
+  it('has no execution on an empty list or zero-only candidate', () => {
+    expectRejected({candidates:[]});
+    expectRejected({candidates:[candidate({budget:0n,paid:0n,refund:0n,work:0n,gasWei:0n,claimGasWei:0n,serviceCostNvda:0n})]});
+  });
+  it('keeps input and nested candidates immutable', () => {
+    const x=input();const before=JSON.stringify(x,(_,v)=>typeof v==='bigint'?v.toString():v);
+    selectCandidate(x);expect(JSON.stringify(x,(_,v)=>typeof v==='bigint'?v.toString():v)).toBe(before);
+  });
+});
+
+describe('PM unknown cost and malformed-data safety', () => {
+  it.each([
+    null,
+    {numerator:0n,denominator:1n,observedAt:100,maxAgeSeconds:30,source:'test'},
+    {numerator:1n,denominator:0n,observedAt:100,maxAgeSeconds:30,source:'test'},
+    {numerator:1n,denominator:1n,observedAt:69,maxAgeSeconds:30,source:'test'},
+    {numerator:1n,denominator:1n,observedAt:101,maxAgeSeconds:30,source:'test'},
+  ])('does not replace invalid or missing FX by zero cost', fx => {
+    const d=selectCandidate(input({fx}));expect(d.action).toBe('WAIT');expect(d.selected).toBeNull();
+    for(const c of d.candidates) expect(c.costNvda).toBeNull();
+  });
+  it('accepts exactly fresh-enough FX', () => expect(selected({fx:{numerator:2n,denominator:3n,observedAt:70,maxAgeSeconds:30,source:'test'}})).not.toBeNull());
+  it.each(['nvdaAvailable','ethAvailable','perRoundCap','dailyRemaining','nvdaReserved','ethReserved','nvdaFeeReserve','ethExitReserve','costPerThousandCap','ownWork'] as const)('requires bigint for %s', key => {
+    expect(()=>selectCandidate({...input(),[key]:1} as unknown as DecisionInput)).toThrow();
+    expect(()=>selectCandidate({...input(),[key]:-1n})).toThrow();
+  });
+  it.each(['budget','paid','refund','work','gasWei','claimGasWei','serviceCostNvda'] as const)('validates candidate field %s before a missing-FX return', key => {
+    expect(()=>selectCandidate(input({fx:null,candidates:[{...candidate(),[key]:1} as unknown as Candidate]}))).toThrow();
+  });
+  it('rejects false refund accounting, impossible Work and duplicate IDs', () => {
+    expect(()=>selectCandidate(input({candidates:[candidate({refund:0n})]}))).toThrow();
+    expect(()=>selectCandidate(input({candidates:[candidate({work:T+1n})]}))).toThrow();
+    expect(()=>selectCandidate(input({candidates:[candidate(),candidate()]}))).toThrow();
+  });
+  it('rejects oversized candidates and invalid clocks', () => {
+    expect(()=>selectCandidate(input({candidates:Array.from({length:65},(_,i)=>candidate({id:String(i)}))}))).toThrow();
+    expect(()=>selectCandidate(input({now:NaN}))).toThrow();
+    expect(()=>selectCandidate(input({now:-1}))).toThrow();
+  });
+});
+
+describe('PM persisted strategy strict runtime types', () => {
+  const valid:StrategyConfig={amount:'10',executions:2,principalBudget:'20',gasBudget:'0',offset:0,window:1,slippageBps:0,expiry:'2999-01-01',recipient:'0x1111111111111111111111111111111111111111'};
+  it.each([
+    ['amount',10],['principalBudget',20],['gasBudget',0],['amount',['10']],['principalBudget',['20']],['gasBudget',['0']],['expiry',['2999-01-01']],['recipient',[valid.recipient]],
+  ])('rejects coercion at %s', (key,value) => expect(validateStrategy({...valid,[key as string]:value} as unknown as StrategyConfig,Date.parse('2026-01-01')).length).toBeGreaterThan(0));
+});
