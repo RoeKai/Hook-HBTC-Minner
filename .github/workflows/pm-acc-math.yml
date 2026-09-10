@@ -1,0 +1,116 @@
+name: PM accumulation math acceptance
+on:
+  push:
+    branches: [qa/acc-core-delivery-20260911]
+    paths: [.github/workflows/pm-acc-math.yml]
+permissions: {}
+concurrency:
+  group: pm-accumulation-math
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BASE: f06a40ed90712fe62ae087dbde5fd646a4bc8800
+      COMMENT_ID: '5626812294'
+      PATCH_BYTES: '21621'
+      PATCH_SHA256: a855b51fb679b078327608e19cd1bc2d1e058e62fa8fac07f05330cf4863cdb5
+    steps:
+      - name: Restore exact public base and validated text delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git init source
+          git -C source fetch --depth=1 https://github.com/RoeKai/Hook-HBTC-Minner.git "$GITHUB_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          cp source/qa/pm-accumulation.test.source evidence/pm-test-original.ts
+          git -C source fetch --depth=1 https://github.com/RoeKai/Hook-HBTC-Minner.git "$BASE"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$BASE"
+          git -C source archive --format=zip --output="$GITHUB_WORKSPACE/evidence/base.zip" "$BASE"
+          python3 - <<'PY'
+          import urllib.request, pathlib, os, re, json, hashlib, subprocess
+          out=pathlib.Path('evidence')
+          url='https://api.github.com/repos/RoeKai/Hook-HBTC-Minner/issues/comments/'+os.environ['COMMENT_ID']
+          req=urllib.request.Request(url,headers={'User-Agent':'PM-accumulation-acceptance/1.0'})
+          with urllib.request.urlopen(req,timeout=25) as response: raw=response.read(400001)
+          assert len(raw)<=400000
+          c=json.loads(raw)
+          assert str(c['id'])==os.environ['COMMENT_ID'] and c['user']['login']=='chatgpt-codex-connector[bot]'
+          assert c['issue_url']=='https://api.github.com/repos/RoeKai/Hook-HBTC-Minner/issues/3'
+          (out/'codex-comment.json').write_bytes(raw)
+          blocks=re.findall(r'```diff\n(.*?)\n```',c['body'],re.S)
+          assert len(blocks)==1,'Expected one full diff'
+          patch=(blocks[0]+'\n').encode()
+          digest=hashlib.sha256(patch).hexdigest()
+          assert len(patch)==int(os.environ['PATCH_BYTES']) and digest==os.environ['PATCH_SHA256']
+          allowed={'src/core/accumulation.ts','src/core/accumulation.test.ts','src/core/strategy.ts'}
+          names=re.findall(r'^diff --git a/(\S+) b/(\S+)$',patch.decode(),re.M)
+          assert len(names)==3 and {a for a,b in names}==allowed and all(a==b for a,b in names)
+          assert not re.search(rb'GIT binary patch|^new file mode (?!100644)|^old mode|^new mode|^deleted file|^rename ',patch,re.M)
+          (out/'patch.diff').write_bytes(patch)
+          p=str((out/'patch.diff').resolve())
+          subprocess.run(['git','-C','source','apply','--index','--check',p],check=True)
+          subprocess.run(['git','-C','source','apply','--index',p],check=True)
+          blobs={}
+          for chunk in re.split(r'(?m)^diff --git ',patch.decode())[1:]:
+              path=chunk.splitlines()[0].split()[1][2:]
+              new=re.search(r'^index [0-9a-f]{40}\.\.([0-9a-f]{40})',chunk,re.M).group(1)
+              data=(pathlib.Path('source')/path).read_bytes()
+              blob=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert blob==new,(path,blob,new)
+              target=out/'files'/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
+              blobs[path]=blob
+          record={'base':os.environ['BASE'],'comment':c['id'],'patch_sha256':digest,'bytes':len(patch),'blobs':blobs}
+          (out/'integrity.json').write_text(json.dumps(record,indent=2)+'\n')
+          print(json.dumps(record,indent=2))
+          # Structural type errors must throw. Well-typed numerical inconsistencies
+          # may throw OR produce an explicitly rejected candidate: both satisfy
+          # the task's rejection rule. Never accept them as an executable result.
+          test=(out/'pm-test-original.ts').read_text()
+          old="    expect(()=>selectCandidate(input({candidates:[candidate({refund:0n})]}))).toThrow();\n    expect(()=>selectCandidate(input({candidates:[candidate({work:T+1n})]}))).toThrow();"
+          new="    for (const c of [candidate({refund:0n}), candidate({work:T+1n})]) {\n      let rejected = false;\n      try { const d = selectCandidate(input({candidates:[c]})); rejected = d.action !== 'PARTICIPATE' && d.selected === null && d.candidates.every(v => !v.accepted); } catch { rejected = true; }\n      expect(rejected).toBe(true);\n    }"
+          assert old in test
+          (out/'pm-accumulation.test.ts').write_text(test.replace(old,new))
+          (out/'test-policy.txt').write_text('Type-invalid data must throw; arithmetic-invalid candidates must be rejected and never selected. The PM fixture change only removes a requirement to use exceptions rather than explicit rejection. Developer files are unchanged.\n')
+          PY
+      - name: Re-run delivered developer suite and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          node --version | tee ../evidence/node-version.txt
+          npm ci --ignore-scripts 2>&1 | tee ../evidence/install.log
+          npm run lint 2>&1 | tee ../evidence/lint.log
+          npm run typecheck 2>&1 | tee ../evidence/typecheck.log
+          npm test -- --reporter=json --outputFile=../evidence/developer-results.json 2>&1 | tee ../evidence/developer-tests.log
+          npm run build 2>&1 | tee ../evidence/build.log
+          git diff --check
+      - name: Independently test new math and integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp evidence/pm-accumulation.test.ts source/src/core/pm-accumulation.test.ts
+          cd source
+          npm run lint 2>&1 | tee ../evidence/integrated-lint.log
+          npm run typecheck 2>&1 | tee ../evidence/integrated-typecheck.log
+          npm test -- --reporter=json --outputFile=../evidence/integrated-results.json 2>&1 | tee ../evidence/integrated-tests.log
+          npm run build 2>&1 | tee ../evidence/integrated-build.log
+      - name: Preserve current dependency findings
+        if: always()
+        shell: bash
+        run: |
+          if test -d source/node_modules; then
+            cd source
+            npm audit --json > ../evidence/audit.json || true
+          fi
+      - name: Upload source and independent acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pm-acc-math-002
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
