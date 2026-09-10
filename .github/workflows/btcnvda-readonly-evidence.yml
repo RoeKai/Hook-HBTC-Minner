@@ -10,51 +10,33 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - name: Inspect existing public events and source verification only
+      - name: Read a bounded historical event sample without changing chain state
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,urllib.parse,urllib.error,json,hashlib,datetime,time
-          ALLOWED={'sourcify.dev','robinhoodchain.blockscout.com','rpc.mainnet.chain.robinhood.com','btcnvda.com'}
-          def emit(kind,**data):print('EVIDENCE_JSON='+json.dumps({'kind':kind,**data},ensure_ascii=False),flush=True)
-          class Redirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self,req,fp,code,msg,headers,newurl):
-                  p=urllib.parse.urlparse(newurl)
-                  if p.scheme!='https' or p.hostname not in ALLOWED:raise ValueError('Redirect outside scope')
-                  return super().redirect_request(req,fp,code,msg,headers,newurl)
-          opener=urllib.request.build_opener(Redirect())
-          def get(url):
-              try:
-                  assert urllib.parse.urlparse(url).hostname in ALLOWED
-                  with opener.open(urllib.request.Request(url,headers={'User-Agent':'ReadOnlyProjectResearch/1.0'}),timeout=15) as r:raw=r.read(1500000)
-                  data=json.loads(raw);emit('http',url=url,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),response=data if len(raw)<25000 else {k:v for k,v in data.items() if k not in ('creationBytecode','runtimeBytecode','sources','creation_bytecode','deployed_bytecode')});return data
-              except urllib.error.HTTPError as e:emit('http-error',url=url,status=e.code,body=e.read(1000).decode('utf-8','replace'));return None
-              except Exception as e:emit('error',url=url,error=str(e));return None
-          ENDPOINT='https://rpc.mainnet.chain.robinhood.com'
-          ALLOWED_METHODS={'eth_getLogs','eth_getTransactionByHash','eth_getTransactionReceipt','eth_getCode','eth_call'}
+          import urllib.request,json,hashlib,time,datetime
+          URL='https://rpc.mainnet.chain.robinhood.com';HOOK='0x541c980ed3e0b5ced0bde5352c32bdab9d26a0cc';TAG=hex(59358960)
+          def emit(kind,**data):print('EVIDENCE_JSON='+json.dumps({'kind':kind,**data}),flush=True)
+          METHODS={'eth_chainId','eth_getLogs','eth_getTransactionByHash','eth_getTransactionReceipt','eth_getCode','eth_call'}
           def rpc(method,params):
-              assert method in ALLOWED_METHODS
+              assert method in METHODS
+              req=urllib.request.Request(URL,data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(),headers={'Content-Type':'application/json','User-Agent':'ReadOnlyProjectResearch/1.0'})
               try:
-                  req=urllib.request.Request(ENDPOINT,data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(),headers={'Content-Type':'application/json'})
-                  with opener.open(req,timeout=20) as r:d=json.load(r)
-                  time.sleep(.2);return d
+                  with urllib.request.urlopen(req,timeout=20) as r:data=json.load(r)
+                  time.sleep(.3);return data
               except Exception as e:return {'error':str(e)}
-          emit('scope',note='Public source lookup and historic chain reads only; no new transaction or wallet operations.',utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
-          HOOK='0x541c980ed3e0b5ced0bde5352c32bdab9d26a0cc';TOKEN='0xdd83f3bb1539f52778314b018c401c0efe3e617f';NVDA='0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec';TAG=hex(59358960)
-          for a in [HOOK,TOKEN]:get('https://sourcify.dev/server/v2/contract/4663/'+a+'?fields=all')
-          for a,n,s in [(TOKEN,'MAX_SUPPLY','32cb6b0c'),(TOKEN,'hook','7f5a7c7b'),(HOOK,'hbtc','2f0fe755'),(HOOK,'nvda','09fe9767'),(HOOK,'reserveToken','f4325d67')]:
-              emit('identity-call',address=a,name=n,block=TAG,response=rpc('eth_call',[{'to':a,'data':'0x'+s},TAG]))
+          emit('scope',note='Bounded public historical reads only; stop if public endpoint refuses access.',utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+          chain=rpc('eth_chainId',[]);emit('chain',response=chain)
+          if chain.get('result')!='0x1237':raise SystemExit(0)
           topic='0x862d2ba9699aac256550b23287759d7118ed3f3b955c395c8068e5bb9e8e0cf4'
-          logs=rpc('eth_getLogs',[{'address':HOOK,'fromBlock':hex(59352000),'toBlock':TAG,'topics':[topic]}])
-          entries=logs.get('result',[]);emit('historic-work-logs',fromBlock=59352000,toBlock=59358960,result=entries,error=logs.get('error'))
-          inspected=set()
-          for entry in entries[-2:]:
-              h=entry['transactionHash'];td=rpc('eth_getTransactionByHash',[h]);tx=td.get('result');rd=rpc('eth_getTransactionReceipt',[h]);r=rd.get('result')
-              emit('historic-transaction',hash=h,transaction={k:tx.get(k) for k in ['from','to','input','value','nonce','chainId','blockNumber','blockHash']} if tx else td,receipt={k:r.get(k) for k in ['status','blockHash','blockNumber','gasUsed','effectiveGasPrice']} if r else rd,logs=[{'address':x['address'],'topics':x['topics'],'data':x['data']} for x in r.get('logs',[])][:30] if r else [])
-              if tx and tx.get('to') and tx['to'] not in inspected:
-                  a=tx['to'];inspected.add(a);code=rpc('eth_getCode',[a,TAG]);v=code.get('result');emit('execution-target-code',address=a,bytes=(len(v)-2)//2 if v else None,sha256=hashlib.sha256(bytes.fromhex(v[2:])).hexdigest() if v else None,error=code.get('error'))
-                  for n,s in [('owner','8da5cb5b'),('beneficiary','38af3eed'),('hook','7f5a7c7b'),('nvda','09fe9767')]:emit('execution-target-getter',address=a,name=n,response=rpc('eth_call',[{'to':a,'data':'0x'+s},TAG]))
+          result=rpc('eth_getLogs',[{'address':HOOK,'fromBlock':hex(59352000),'toBlock':TAG,'topics':[topic]}]);entries=result.get('result',[]);emit('work-logs',fromBlock=59352000,toBlock=59358960,events=entries,error=result.get('error'))
+          if entries:
+              h=entries[-1]['transactionHash'];t=rpc('eth_getTransactionByHash',[h]);r=rpc('eth_getTransactionReceipt',[h]);tx=t.get('result');receipt=r.get('result')
+              emit('sample',hash=h,transaction={k:tx.get(k) for k in ['from','to','input','value','nonce','chainId','blockNumber','blockHash']} if tx else t,receipt={k:receipt.get(k) for k in ['status','blockHash','blockNumber','gasUsed','effectiveGasPrice','gasUsedForL1','l1Fee']} if receipt else r,logs=[{'address':x['address'],'topics':x['topics'],'data':x['data']} for x in receipt.get('logs',[])][:30] if receipt else [])
+              if tx and tx.get('to'):
+                  a=tx['to'];code=rpc('eth_getCode',[a,TAG]);v=code.get('result');emit('target-code',address=a,bytes=(len(v)-2)//2 if v else None,sha256=hashlib.sha256(bytes.fromhex(v[2:])).hexdigest() if v else None,error=code.get('error'))
+                  for n,s in [('owner','8da5cb5b'),('beneficiary','38af3eed'),('hook','7f5a7c7b'),('nvda','09fe9767')]:emit('target-getter',address=a,name=n,response=rpc('eth_call',[{'to':a,'data':'0x'+s},TAG]))
           emit('complete',utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
           PY
