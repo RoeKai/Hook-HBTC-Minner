@@ -12,71 +12,91 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - name: Read and simulate permissions and claims without persisting changes
+      - name: Verify recent-block permission and transient reward effects
         shell: bash
         run: |
           python3 - <<'PY'
           import urllib.request,urllib.parse,urllib.error,json,hashlib,datetime,time,pathlib
           OUT=pathlib.Path('evidence');OUT.mkdir(exist_ok=True);events=[]
-          RPC='https://rpc.mainnet.chain.robinhood.com'
-          HOOK='0x541c980ed3e0b5ced0bde5352c32bdab9d26a0cc';TOKEN='0xdd83f3bb1539f52778314b018c401c0efe3e617f';NVDA='0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec'
+          RPC='https://rpc.mainnet.chain.robinhood.com';HOOK='0x541c980ed3e0b5ced0bde5352c32bdab9d26a0cc';TOKEN='0xdd83f3bb1539f52778314b018c401c0efe3e617f';NVDA='0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec'
           MINER='0x6b9e91b781f24dd3f374ec9008017e6328757e71';OWNER='0xa761b292a2587e9fdc32eddac44dc00e37db3da2';OUTSIDER='0x000000000000000000000000000000000000dead';MANAGER='0x8366a39cc670b4001a1121b8f6a443a643e40951'
-          METHODS={'eth_chainId','eth_getBlockByNumber','eth_call','eth_estimateGas','eth_getLogs','eth_getTransactionByHash','eth_getTransactionReceipt','debug_traceCall','eth_getStorageAt'}
           def word(v):return (v[2:].lower() if isinstance(v,str) and v.startswith('0x') else hex(v)[2:]).zfill(64)
           def emit(kind,**data):
               x={'kind':kind,**data};events.append(x);print('EVIDENCE_JSON='+json.dumps(x,ensure_ascii=False),flush=True);(OUT/'events.json').write_text(json.dumps(events,ensure_ascii=False,indent=2))
           def rpc(method,params,label):
-              assert method in METHODS
+              assert method in {'eth_chainId','eth_getBlockByNumber','eth_call','eth_estimateGas','eth_getStorageAt'}
               try:
                   req=urllib.request.Request(RPC,data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(),headers={'Content-Type':'application/json','User-Agent':'ReadOnlyProjectResearch/1.0'})
-                  with urllib.request.urlopen(req,timeout=25) as r:raw=r.read(3000001)
-                  if len(raw)>3000000:raise ValueError('Response size cap')
+                  with urllib.request.urlopen(req,timeout=25) as r:raw=r.read(300000)
                   (OUT/(label+'.json')).write_bytes(raw);d=json.loads(raw);time.sleep(.3);return d
               except Exception as e:return {'error':str(e)}
-          def call(label,to,data,tag,sender=OUTSIDER,gas=12000000):
-              tx={'from':sender,'to':to,'data':data,'value':'0x0','gas':hex(gas)}
-              r=rpc('eth_call',[tx,tag],label);emit('simulation',label=label,to=to,sender=sender,block=tag,calldata=data,response=r);return tx,r
-          def trace(label,tx,tag):
-              r=rpc('debug_traceCall',[tx,tag,{'tracer':'callTracer','timeout':'12s','tracerConfig':{'withLog':True}}],label)
-              def slim(c):
-                  return {k:v for k,v in c.items() if k!='calls'}|({'calls':[slim(x) for x in c['calls']]} if c.get('calls') else {})
-              data=r.get('result');s=slim(data) if isinstance(data,dict) else r
-              emit('trace',label=label,block=tag,response=s if len(json.dumps(s))<30000 else {'stored_file':label+'.json','bytes':len(json.dumps(s))})
-          emit('scope',utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),note='All simulations use eth_call/debug_traceCall only. No key, signature, eth_sendTransaction, eth_sendRawTransaction, persisted balance change, or wallet access. Simulated from values test public contract behavior; not proof of ownership.')
-          chain=rpc('eth_chainId',[],'chain');emit('chain',response=chain)
-          if chain.get('result')!='0x1237':raise SystemExit(0)
-          old=hex(59358960);new=hex(59729080)
-          for tag in [old,new]:
-              b=rpc('eth_getBlockByNumber',[tag,False],'block-'+tag).get('result');emit('fixed-block',tag=tag,block={k:b.get(k) for k in ['number','hash','timestamp']} if b else None)
-              for label,to,data in [('claimCursor',HOOK,'0x59a9f915'+word(OWNER)),('pendingRewards',HOOK,'0x31d7a262'+word(OWNER)),('BTCNVDA-balance',TOKEN,'0x70a08231'+word(OWNER)),('NVDA-balance',NVDA,'0x70a08231'+word(OWNER)),('miner-allowance',NVDA,'0xdd62ed3e'+word(OWNER)+word(MINER)),('work539',HOOK,'0xcd74be35'+word(539)+word(OWNER)),('reward539',HOOK,'0x910e056d'+word(539)+word(OWNER)),('currentRound',HOOK,'0x46e2e35d'),('feeBps',HOOK,'0x312de888')]:call(label+'-'+tag,to,data,tag)
-          for n,s in [('owner','8da5cb5b'),('beneficiary','38af3eed'),('manager','481c6a75'),('hook','7f5a7c7b'),('chainId','9a8a0592')]:call('miner-'+n,MINER,'0x'+s,new)
+          def call(label,to,data,sender=OUTSIDER,gas=24000000):
+              tx={'from':sender,'data':data,'value':'0x0','gas':hex(gas)}
+              if to:tx['to']=to
+              r=rpc('eth_call',[tx,TAG],label);emit('simulation',label=label,to=to,sender=sender,block=TAG,calldata=data,response=r);return tx,r
+          emit('scope',utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),note='Public source reads and transient eth_call simulation only. No broadcasts, wallet access, keys, signatures or persisted contract creation. Prior old-block calls were RPC archive errors, not contract rejections; debug_traceCall was unavailable and is not retried.')
+          c=rpc('eth_chainId',[],'chain');b=rpc('eth_getBlockByNumber',['latest',False],'latest');block=b.get('result')
+          if c.get('result')!='0x1237' or not block:emit('blocked',chain=c,block=b);raise SystemExit(0)
+          TAG=block['number'];emit('fixed-block',chain=4663,block={k:block.get(k) for k in ['number','hash','timestamp']})
+          queries=[('cursor-before',HOOK,'0x59a9f915'+word(OWNER)),('pending-before',HOOK,'0x31d7a262'+word(OWNER)),('balance-before',TOKEN,'0x70a08231'+word(OWNER)),('NVDA-before',NVDA,'0x70a08231'+word(OWNER)),('allowance-before',NVDA,'0xdd62ed3e'+word(OWNER)+word(MINER)),('currentRound',HOOK,'0x46e2e35d'),('fee',HOOK,'0x312de888'),('hbtc',HOOK,'0x2f0fe755'),('token-pool',TOKEN,'0x16f0115b')]
+          for label,a,data in queries:call(label,a,data)
           mine='0x071e9503'+word(3191717366834175)+word(3166260000000002)
-          for sender,name in [(OUTSIDER,'outsider'),(OWNER,'owner')]:
-              tx,r=call('mine-'+name,MINER,mine,old,sender);trace('trace-mine-'+name,tx,old)
-          callback='0x91dd7346'+word(32)+word(0)
-          for sender,name in [(OUTSIDER,'outsider'),(MANAGER,'manager-idle')]:call('callback-'+name,MINER,callback,old,sender)
-          call('owner-zero-budget',MINER,'0x071e9503'+word(0)+word(0),old,OWNER)
-          call('owner-unreachable-minWork',MINER,'0x071e9503'+word(3191717366834175)+word(319171736683417500),old,OWNER)
-          for label,data,sender in [('claim-default','0x4e71d92d',OWNER),('claim-one','0x1ba2295a'+word(1),OWNER),('claim-outsider','0x4e71d92d',OUTSIDER),('claim-one-outsider','0x1ba2295a'+word(1),OUTSIDER),('settleFor-owner-by-outsider','0x3dd45adb'+word(OWNER),OUTSIDER)]:
-              tx,r=call(label,HOOK,data,old,sender,24000000)
-              if label in ('claim-default','claim-one','settleFor-owner-by-outsider'):trace('trace-'+label,tx,old)
-              if 'error' not in r:emit('gas-estimate',label=label,block=old,response=rpc('eth_estimateGas',[tx,old],'gas-'+label))
-          call('token-pool',TOKEN,'0x16f0115b',old)
-          call('unauthorized-token-mint',TOKEN,'0x40c10f19'+word(OUTSIDER)+word(1),old,OUTSIDER)
-          # Discover an already occurred claim if present in one bounded recent interval; no full-chain scan.
-          topic='0xd92c424393cb3ccdf7d5e36602e3bfa34f24490579ba47978f4bcfad496995f2'
-          logs=rpc('eth_getLogs',[{'address':HOOK,'fromBlock':hex(59719080),'toBlock':new,'topics':[topic]}],'historical-claim-events');entries=logs.get('result',[]);emit('claim-events',fromBlock=59719080,toBlock=59729080,count=len(entries),events=entries[:4],error=logs.get('error'))
-          if entries:
-              h=entries[-1]['transactionHash'];t=rpc('eth_getTransactionByHash',[h],'claim-tx');r=rpc('eth_getTransactionReceipt',[h],'claim-receipt');emit('historical-claim',hash=h,transaction=t,receipt=r)
-          # Verify simulated calls did not persist state by re-reading the same block.
-          call('claimCursor-after-simulations',HOOK,'0x59a9f915'+word(OWNER),old)
-          call('BTCNVDA-after-simulations',TOKEN,'0x70a08231'+word(OWNER),old)
+          for name,sender in [('outsider',OUTSIDER),('owner',OWNER)]:
+              tx,r=call('mine-'+name,MINER,mine,sender)
+              if 'error' not in r:emit('gas-estimate',label='mine-'+name,block=TAG,response=rpc('eth_estimateGas',[tx,TAG],'gas-mine-'+name))
+          for name,sender in [('outsider',OUTSIDER),('manager-idle',MANAGER)]:call('callback-'+name,MINER,'0x91dd7346'+word(32)+word(0),sender)
+          call('mine-zero-budget',MINER,'0x071e9503'+word(0)+word(0),OWNER)
+          call('mine-too-high-minimum',MINER,'0x071e9503'+word(3191717366834175)+word(319171736683417500),OWNER)
+          call('mint-outsider',TOKEN,'0x40c10f19'+word(OUTSIDER)+word(1))
+          for label,data,sender in [('claim-default','0x4e71d92d',OWNER),('claim-one','0x1ba2295a'+word(1),OWNER),('claim-128','0x1ba2295a'+word(128),OWNER),('claim-outsider','0x4e71d92d',OUTSIDER),('claim-one-outsider','0x1ba2295a'+word(1),OUTSIDER),('settleFor-owner-by-outsider','0x3dd45adb'+word(OWNER),OUTSIDER)]:
+              tx,r=call(label,HOOK,data,sender)
+              if 'error' not in r:emit('gas-estimate',label=label,block=TAG,response=rpc('eth_estimateGas',[tx,TAG],'gas-'+label))
+          # A deployless init-code eth_call first reads balances/cursor, calls permissionless settleFor,
+          # then reads effects and repeats. It returns observations but is NEVER broadcast or deployed.
+          code=bytearray();labels=[]
+          def push(v):
+              n=max(1,(v.bit_length()+7)//8);assert n<=32;code.append(0x5f+n);code.extend(v.to_bytes(n,'big'))
+          def store(offset,value):push(value);push(offset);code.append(0x52)
+          def operation(label,to,data,write=False,self_balance=False):
+              idx=len(labels);labels.append(label);raw=bytes.fromhex(data.removeprefix('0x'))
+              for p in range(0,len(raw),32):store(p,int.from_bytes(raw[p:p+32].ljust(32,b'\0'),'big'))
+              if self_balance:code.append(0x30);push(4);code.append(0x52)
+              store(0x300,0)
+              push(32);push(0x300);push(len(raw));push(0)
+              if write:push(0)
+              push(int(to,16));code.append(0x5a);code.append(0xf1 if write else 0xfa)
+              push(0x400+idx*64);code.append(0x52)
+              push(0x300);code.append(0x51);push(0x420+idx*64);code.append(0x52)
+          bal='0x70a08231'+word(OWNER);selfbal='0x70a08231'+word(0);cursor='0x59a9f915'+word(OWNER);settle='0x3dd45adb'+word(OWNER)
+          operation('beneficiaryBalanceBefore',TOKEN,bal);operation('helperBalanceBefore',TOKEN,selfbal,self_balance=True);operation('cursorBefore',HOOK,cursor)
+          operation('firstSettleFor',HOOK,settle,True);operation('beneficiaryBalanceAfter',TOKEN,bal);operation('helperBalanceAfter',TOKEN,selfbal,self_balance=True);operation('cursorAfter',HOOK,cursor)
+          operation('repeatSettleFor',HOOK,settle,True);operation('beneficiaryBalanceAfterRepeat',TOKEN,bal);operation('cursorAfterRepeat',HOOK,cursor)
+          push(len(labels)*64);push(0x400);code.append(0xf3)
+          (OUT/'transient-claim-probe-initcode.hex').write_text('0x'+code.hex())
+          tx,r=call('transient-claim-effect-probe',None,'0x'+code.hex())
+          v=r.get('result')
+          if v and len(v)==2+len(labels)*128:
+              words=[int(v[i:i+64],16) for i in range(2,len(v),64)];emit('transient-effects',block=TAG,rows=[{'label':l,'callSucceeded':words[2*i],'value':str(words[2*i+1])} for i,l in enumerate(labels)])
+          call('cursor-after-all-simulations',HOOK,cursor);call('balance-after-all-simulations',TOKEN,bal)
+          # Other public content-addressed gateways. Never bypass explorer challenges/access control.
+          hashes={'hook':'Qmbeur1McfY4r8p8kjjwynU1gB7mePsiBeeHYMiWuntzuZ','miner':'QmVRktFxhTvHJkcVD5Hy1ZkgTz3S4D97Kj4WYMuSjuuxG6','token':'QmT7i4DoGU32qAtPqrapZATFRw9f77nA5WpBa72UCYhj5L'}
+          for name,cid in hashes.items():
+              for host in ['dweb.link','gateway.pinata.cloud']:
+                  u='https://'+host+'/ipfs/'+cid
+                  try:
+                      req=urllib.request.Request(u,headers={'User-Agent':'ReadOnlyProjectResearch/1.0'})
+                      with urllib.request.urlopen(req,timeout=12) as res:raw=res.read(1000001);status=res.status
+                      if len(raw)>1000000:raise ValueError('Size cap')
+                      (OUT/(name+'-metadata-'+host+'.txt')).write_bytes(raw)
+                      emit('metadata-gateway',url=u,status=status,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),response=json.loads(raw))
+                      break
+                  except Exception as e:emit('metadata-gateway-error',url=u,error=str(e))
           emit('complete',utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
           PY
       - name: Upload public evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: btcnvda-permissions-and-claims
+          name: btcnvda-transient-claim-verification
           path: evidence/
           retention-days: 14
