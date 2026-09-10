@@ -1,0 +1,103 @@
+name: PM core patch acceptance
+on:
+  push:
+    branches: [qa/acc-core-delivery-20260911]
+    paths: [.github/workflows/pm-core-delivery.yml]
+permissions: {}
+concurrency:
+  group: pm-core-patch-acceptance
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BASE: 835fc653e171a0be06d821a598312ff9efbf8ccc
+      COMMENT_ID: '5615978555'
+      PATCH_SHA256: 629ee93dda1533cc7f1e1842e669f9d707c765d503d035c9b8a31de9ec13ffb3
+      PATCH_BYTES: '9801'
+    steps:
+      - name: Retrieve exact public patch with no repository credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git init source
+          git -C source fetch --depth=4 https://github.com/RoeKai/Hook-HBTC-Minner.git "$GITHUB_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          cp source/qa/pm-acceptance.test.ts evidence/pm-acceptance.test.ts
+          git -C source checkout --detach "$BASE"
+          git -C source archive --format=zip --output="$GITHUB_WORKSPACE/evidence/base.zip" "$BASE"
+          python3 - <<'PY'
+          import urllib.request, json, os, re, hashlib, pathlib, subprocess
+          out=pathlib.Path('evidence')
+          url='https://api.github.com/repos/RoeKai/Hook-HBTC-Minner/issues/comments/'+os.environ['COMMENT_ID']
+          with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'PM-core-acceptance/1.0'}),timeout=25) as r:
+              raw=r.read(150000)
+          comment=json.loads(raw)
+          assert str(comment['id'])==os.environ['COMMENT_ID']
+          assert comment['user']['login']=='chatgpt-codex-connector[bot]'
+          (out/'codex-comment.json').write_bytes(raw)
+          matches=re.findall(r'```diff\n(.*?)\n```',comment['body'],re.S)
+          assert len(matches)==1, 'Expected one complete diff'
+          patch=(matches[0]+'\n').encode('utf-8')
+          actual=hashlib.sha256(patch).hexdigest()
+          assert actual==os.environ['PATCH_SHA256'], ('Patch SHA mismatch',actual)
+          assert len(patch)==int(os.environ['PATCH_BYTES']), ('Patch length mismatch',len(patch))
+          allowed={'src/core/amount.ts','src/core/strategy.ts','src/core/pm-boundaries.test.ts','src/core/pm-format-compatibility.test.ts'}
+          names=re.findall(r'^diff --git a/(\S+) b/(\S+)$',patch.decode(),re.M)
+          assert names and all(a==b and a in allowed for a,b in names)
+          assert not re.search(rb'GIT binary patch|^new file mode (?!100644)|^old mode|^new mode|^deleted file',patch,re.M)
+          (out/'patch.diff').write_bytes(patch)
+          subprocess.run(['git','-C','source','apply','--check',str((out/'patch.diff').resolve())],check=True)
+          subprocess.run(['git','-C','source','apply',str((out/'patch.diff').resolve())],check=True)
+          hashes={}
+          for a,b in names:
+              p=pathlib.Path('source')/b; value=p.read_bytes()
+              digest=hashlib.sha1(b'blob '+str(len(value)).encode()+b'\0'+value).hexdigest()
+              target=out/'files'/b;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(value)
+              hashes[b]=digest
+          record={'base':os.environ['BASE'],'comment':comment['id'],'patch_sha256':actual,'bytes':len(patch),'blobs':hashes}
+          (out/'integrity.json').write_text(json.dumps(record,indent=2))
+          print(json.dumps(record,indent=2))
+          PY
+      - name: Run recovered developer tests and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          node --version | tee ../evidence/node-version.txt
+          npm ci --ignore-scripts 2>&1 | tee ../evidence/install.log
+          npm run lint 2>&1 | tee ../evidence/lint.log
+          npm run typecheck 2>&1 | tee ../evidence/typecheck.log
+          npm test 2>&1 | tee ../evidence/developer-tests.log
+          npm run build 2>&1 | tee ../evidence/build.log
+          git diff --check
+      - name: Run independent PM regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp evidence/pm-acceptance.test.ts source/src/core/pm-acceptance.test.ts
+          cd source
+          set +e
+          npm test -- --run src/core/pm-acceptance.test.ts --reporter=json --outputFile=../evidence/pm-results.json > ../evidence/pm-tests.log 2>&1
+          rc=$?
+          cat ../evidence/pm-tests.log
+          printf '%s\n' "$rc" > ../evidence/pm-exit-code.txt
+          exit "$rc"
+      - name: Record dependency advisories without hiding them
+        if: always()
+        shell: bash
+        run: |
+          if test -d source/node_modules; then
+            cd source
+            npm audit --json > ../evidence/audit.json || true
+          fi
+      - name: Upload exact source patch and test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pm-core-acceptance
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
