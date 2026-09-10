@@ -20,7 +20,8 @@ export interface StrategyConfig { amount: string; executions: number; principalB
 export function validateStrategy(s: StrategyConfig, now = Date.now()): string[] {
   const errors: string[] = [];
   const integerAmount = /^(0|[1-9]\d*)$/;
-  const amountsValid = [s.amount, s.principalBudget, s.gasBudget].every((value) => integerAmount.test(value));
+  const amountsValid = [s.amount, s.principalBudget, s.gasBudget]
+    .every((value) => typeof value === 'string' && integerAmount.test(value));
   const executionsValid = Number.isSafeInteger(s.executions) && s.executions >= 1;
 
   if (!amountsValid) {
@@ -34,8 +35,8 @@ export function validateStrategy(s: StrategyConfig, now = Date.now()): string[] 
   if (!executionsValid) errors.push('Executions must be a positive safe integer');
   if (!Number.isSafeInteger(s.offset) || !Number.isSafeInteger(s.window) || s.offset < 0 || s.offset >= 600 || s.window < 1 || s.offset > 600 - s.window) errors.push('Window must fit the 600 second cycle');
   if (!Number.isSafeInteger(s.slippageBps) || s.slippageBps < 0 || s.slippageBps > 10000) errors.push('Slippage must be an integer from 0–10000 bps');
-  if (!/^0x[a-fA-F0-9]{40}$/.test(s.recipient)) errors.push('Recipient must be an address');
-  const expiry = Date.parse(s.expiry);
+  if (typeof s.recipient !== 'string' || !/^0x[a-fA-F0-9]{40}$/.test(s.recipient)) errors.push('Recipient must be an address');
+  const expiry = typeof s.expiry === 'string' ? Date.parse(s.expiry) : Number.NaN;
   if (!Number.isFinite(expiry) || !Number.isFinite(now) || expiry <= now) errors.push('Expiry must be a valid future date');
   return errors;
 }
