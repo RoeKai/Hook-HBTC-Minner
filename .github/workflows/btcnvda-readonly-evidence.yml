@@ -12,96 +12,61 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Read public pages without wallet or script execution
+      - name: Read discovered public configuration and protocol documents
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request, urllib.parse, urllib.error, json, re, hashlib, datetime, socket
+          import urllib.request, urllib.parse, json, re, hashlib, datetime
           from html.parser import HTMLParser
-          ALLOWED = {'btcnvda.com','www.btcnvda.com','api.robinhood.com','robinhoodchain.blockscout.com','docs.robinhood.com'}
-          LIMIT = 2000000
-          def emit(kind, **data):
-              print('EVIDENCE_JSON=' + json.dumps({'kind':kind, **data},ensure_ascii=False), flush=True)
+          ALLOWED={'btcnvda.com','bsptreasury.com','robinhoodchain.blockscout.com'}
+          def emit(kind,**data): print('EVIDENCE_JSON='+json.dumps({'kind':kind,**data},ensure_ascii=False),flush=True)
           class Redirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, req, fp, code, msg, headers, newurl):
-                  parsed=urllib.parse.urlparse(newurl)
-                  if parsed.scheme!='https' or parsed.hostname not in ALLOWED:
-                      raise ValueError('Redirect outside bounded public evidence scope: '+newurl)
-                  return super().redirect_request(req, fp, code, msg, headers, newurl)
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  p=urllib.parse.urlparse(newurl)
+                  if p.scheme!='https' or p.hostname not in ALLOWED: raise ValueError('Redirect outside scope')
+                  return super().redirect_request(req,fp,code,msg,headers,newurl)
           opener=urllib.request.build_opener(Redirect())
           class Page(HTMLParser):
-              def __init__(self):
-                  super().__init__(); self.hidden=0; self.text=[]; self.links=[]; self.scripts=[]
-              def handle_starttag(self, tag, attrs):
+              def __init__(self): super().__init__();self.hidden=0;self.text=[];self.links=[];self.scripts=[]
+              def handle_starttag(self,tag,attrs):
                   a=dict(attrs)
                   if tag in ('script','style','noscript'): self.hidden+=1
                   if tag=='script' and a.get('src'): self.scripts.append(a['src'])
                   if tag=='a' and a.get('href'): self.links.append(a['href'])
               def handle_endtag(self,tag):
                   if tag in ('script','style','noscript'): self.hidden=max(0,self.hidden-1)
-              def handle_data(self, data):
+              def handle_data(self,data):
                   if not self.hidden and data.strip(): self.text.append(data.strip())
-          seen=set()
-          def fetch(url, purpose):
-              if url in seen: return None
-              seen.add(url)
-              p=urllib.parse.urlparse(url)
-              if p.scheme!='https' or p.hostname not in ALLOWED: return None
+          def get(url,mode='source'):
               try:
-                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; ReadOnlyProjectResearch/1.0)','Accept':'text/html,application/json,application/javascript,text/plain;q=0.9','Accept-Encoding':'identity'})
-                  with opener.open(req,timeout=18) as response:
-                      raw=response.read(LIMIT+1); status=response.status; final=response.url; ctype=response.headers.get('Content-Type','')
-                  if len(raw)>LIMIT:
-                      emit('oversize',url=url,size_more_than=LIMIT); return None
-                  text=raw.decode('utf-8','replace')
-                  emit('http',url=url,final_url=final,status=status,content_type=ctype,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),purpose=purpose,utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+                  p=urllib.parse.urlparse(url)
+                  if p.scheme!='https' or p.hostname not in ALLOWED: raise ValueError('Out of scope')
+                  with opener.open(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; ReadOnlyProjectResearch/1.0)','Accept-Encoding':'identity'}),timeout=25) as r:
+                      raw=r.read(2000001);status=r.status;ctype=r.headers.get('Content-Type','')
+                  if len(raw)>2000000: raise ValueError('Response exceeds limit')
+                  text=raw.decode('utf-8','replace');emit('http',url=url,status=status,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
                   if 'html' in ctype or '<html' in text[:1000].lower():
-                      page=Page();page.feed(text)
-                      emit('page',url=final,title=re.findall(r'<title[^>]*>(.*?)</title>',text,re.S|re.I),visible_text='\n'.join(page.text)[:45000],links=page.links[:150],scripts=page.scripts[:40])
-                  else: page=None
-                  addresses=list(dict.fromkeys(re.findall(r'0x[0-9a-fA-F]{40}(?![0-9a-fA-F])',text)))
-                  emit('addresses',url=final,values=addresses[:120])
-                  if purpose=='issuer-assets':
+                      page=Page();page.feed(text);emit('page',url=url,text='\n'.join(page.text)[:40000],links=page.links[:100],scripts=page.scripts[:20]);return text
+                  if mode=='contract':
                       data=json.loads(text)
-                      items=data if isinstance(data,list) else data.get('assets',data.get('results',[]))
-                      emit('issuer-nvda',url=final,assets=[x for x in items if str(x.get('tokenSymbol',x.get('symbol',''))).upper()=='NVDA'])
-                  elif purpose=='explorer-search':
-                      emit('search-result',url=final,response=text[:45000])
-                  else:
-                      if len(text)<65000:
-                          for i in range(0,len(text),8000): emit('source-chunk',url=final,offset=i,text=text[i:i+8000])
-                      else:
-                          pattern=re.compile(r'BTCNVDA|NVDA|chainId|chain_id|https?://[^\s\"\'<>]+|0x[0-9a-fA-F]{40}|function\s+(?:mine|claim|mint|deposit|stake)|rewardPer|currentEpoch|currentBlock|totalSupply',re.I)
-                          ends=[]; snippets=[]
-                          for m in pattern.finditer(text):
-                              start=max(0,m.start()-200);end=min(len(text),m.end()+450)
-                              if ends and start<ends[-1]: continue
-                              snippets.append({'offset':start,'text':text[start:end]});ends.append(end)
-                              if len(snippets)>=80: break
-                          emit('source-excerpts',url=final,snippets=snippets)
-                  return (text,page,final)
-              except Exception as error:
-                  emit('error',url=url,purpose=purpose,error=type(error).__name__+': '+str(error)); return None
-          emit('scope',note='Public GET reads only. No checkout, credentials, wallet, signatures, transactions, JavaScript execution, private endpoints, or production changes.')
-          try: emit('dns',host='btcnvda.com',addresses=sorted(set(x[4][0] for x in socket.getaddrinfo('btcnvda.com',443))))
-          except Exception as e: emit('dns-error',error=str(e))
-          home=fetch('https://btcnvda.com/?share=en-v2','project-home')
-          if home is None: home=fetch('https://btcnvda.com/','project-home')
-          if home:
-              text,page,final=home
-              if page:
-                  scripts=[]
-                  for path in page.scripts:
-                      url=urllib.parse.urljoin(final,path)
-                      if urllib.parse.urlparse(url).hostname in {'btcnvda.com','www.btcnvda.com'} and url not in scripts: scripts.append(url)
-                  for url in scripts[:6]: fetch(url,'project-script')
-                  links=[]
-                  for path in page.links:
-                      url=urllib.parse.urljoin(final,path)
-                      if urllib.parse.urlparse(url).hostname in {'btcnvda.com','www.btcnvda.com'} and re.search(r'whitepaper|docs|faq|mechanism|how|about|tokenomics|guide|verify',url,re.I) and not url.endswith('.pdf') and url not in links: links.append(url)
-                  for url in links[:4]: fetch(url,'project-document')
-          fetch('https://api.robinhood.com/rhj/assets','issuer-assets')
-          fetch('https://robinhoodchain.blockscout.com/api/v2/search?q=BTCNVDA','explorer-search')
-          fetch('https://robinhoodchain.blockscout.com/api/v2/search?q=NVDA','explorer-search')
-          emit('complete',requests=len(seen),utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+                      emit('contract',url=url,metadata={k:v for k,v in data.items() if k not in ('abi','source_code','additional_sources','creation_bytecode','deployed_bytecode','constructor_args','decoded_constructor_args')},abi=data.get('abi'),constructor=data.get('decoded_constructor_args'),additional_sources=[x.get('file_path') for x in data.get('additional_sources',[])])
+                      source=data.get('source_code','') or ''
+                      if source:
+                          for offset in range(0,min(len(source),65000),10000): emit('source',url=url,offset=offset,text=source[offset:offset+10000])
+                      return data
+                  for offset in range(0,min(len(text),80000),10000):emit('source',url=url,offset=offset,text=text[offset:offset+10000])
+                  if 'json' in ctype or text.startswith('{'):return json.loads(text)
+                  return text
+              except Exception as e:emit('error',url=url,error=type(e).__name__+': '+str(e));return None
+          emit('scope',note='Phase 2: public GET only; no wallet, signing, broadcast, secrets or application code changes.')
+          cfg=get('https://btcnvda.com/assets/protocol.json')
+          get('https://bsptreasury.com/protocol/')
+          get('https://btcnvda.com/assets/live-instance.mjs')
+          get('https://btcnvda.com/assets/buy-ui.mjs')
+          get('https://btcnvda.com/api/instance')
+          get('https://btcnvda.com/btcnvda/dashboard.html')
+          for a in ['0x541c980ed3e0b5ced0bde5352c32bdab9d26a0cc','0xDD83F3Bb1539F52778314B018C401c0EFE3e617F']:
+              get('https://robinhoodchain.blockscout.com/api/v2/smart-contracts/'+a,'contract')
+              get('https://robinhoodchain.blockscout.com/api/v2/addresses/'+a)
+          emit('complete',utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
           PY
