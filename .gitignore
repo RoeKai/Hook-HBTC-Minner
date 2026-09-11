@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node / frontend build
+node_modules/
+dist/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# R1 acceptance screenshots are generated and delivered out-of-band.
+docs/acceptance/screenshots/r1-desktop.png
+docs/acceptance/screenshots/r1-mobile-360.png
