@@ -1,0 +1,98 @@
+name: PM accumulation UI acceptance
+on:
+  push:
+    branches: [qa/acc-core-delivery-20260911]
+    paths: [.github/workflows/pm-acc-ui-acceptance.yml]
+permissions: {}
+concurrency:
+  group: pm-acc-ui-acceptance
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BASE: d4072fd23924d1ccd842e3ddc166abc7c1463089
+      COMMENT_ID: '5627028113'
+      PATCH_BYTES: '27876'
+      PATCH_SHA256: 0d27d45bbb5b7bf4110befc3b53a95db7b2088a3d22cd8e5d0631c0a83dbc5ec
+    steps:
+      - name: Recover exact public patch without repository credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git init source
+          git -C source fetch --depth=1 https://github.com/RoeKai/Hook-HBTC-Minner.git "$BASE"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$BASE"
+          python3 - <<'PY'
+          import urllib.request,json,re,os,hashlib,pathlib,subprocess,shutil
+          out=pathlib.Path('evidence')
+          url='https://api.github.com/repos/RoeKai/Hook-HBTC-Minner/issues/comments/'+os.environ['COMMENT_ID']
+          with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'PM-UI-acceptance/1.0'}),timeout=25) as r:
+              raw=r.read(250001)
+          assert len(raw)<=250000
+          c=json.loads(raw)
+          assert str(c['id'])==os.environ['COMMENT_ID'] and c['user']['login']=='chatgpt-codex-connector[bot]'
+          out.joinpath('codex-comment.json').write_bytes(raw)
+          pieces=re.findall(r'```diff\n(.*?)\n```',c['body'],re.S)
+          assert len(pieces)==1
+          patch=(pieces[0]+'\n').encode()
+          assert len(patch)==int(os.environ['PATCH_BYTES'])
+          assert hashlib.sha256(patch).hexdigest()==os.environ['PATCH_SHA256']
+          text=patch.decode('utf-8')
+          allowed={'src/App.tsx','src/components/AccumulationPreview.tsx','src/components/AccumulationPreview.test.tsx','src/components/AccumulationPreview.css','src/core/accumulation.ts','src/core/accumulation.test.ts','src/styles.css'}
+          names=re.findall(r'^diff --git a/(\S+) b/(\S+)$',text,re.M)
+          assert names and len(names)==len(set(a for a,b in names))
+          assert all(a==b and a in allowed for a,b in names)
+          assert not re.search(r'GIT binary patch|^new file mode (?!100644)|^old mode|^new mode|^deleted file|^rename ',text,re.M)
+          out.joinpath('patch.diff').write_bytes(patch)
+          subprocess.run(['git','-C','source','apply','--check',str(out.joinpath('patch.diff').resolve())],check=True)
+          subprocess.run(['git','-C','source','apply',str(out.joinpath('patch.diff').resolve())],check=True)
+          hashes={}
+          for section in re.split(r'(?=^diff --git )',text,flags=re.M):
+              if not section:continue
+              path=re.search(r'^diff --git a/(\S+)',section).group(1)
+              expected=re.search(r'^index [0-9a-f]{40}\.\.([0-9a-f]{40})',section,re.M).group(1)
+              data=pathlib.Path('source',path).read_bytes()
+              actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert actual==expected,(path,actual,expected)
+              hashes[path]=actual
+          files=subprocess.check_output(['git','-C','source','ls-files','-z']).decode().split('\0')
+          for path in set(filter(None,files))|set(hashes):
+              src=pathlib.Path('source',path)
+              assert not src.is_symlink()
+              dest=out/'source'/path;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(src,dest)
+          out.joinpath('integrity.json').write_text(json.dumps({'base':os.environ['BASE'],'commentId':c['id'],'patchBytes':len(patch),'patchSha256':hashlib.sha256(patch).hexdigest(),'blobs':hashes},indent=2))
+          print(out.joinpath('integrity.json').read_text())
+          PY
+      - name: Independently rerun developer suite and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          node --version | tee ../evidence/node-version.txt
+          npm ci --ignore-scripts 2>&1 | tee ../evidence/install.log
+          npm run lint 2>&1 | tee ../evidence/lint.log
+          npm run typecheck 2>&1 | tee ../evidence/typecheck.log
+          npm test -- --reporter=json --outputFile=../evidence/developer-results.json 2>&1 | tee ../evidence/developer-tests.log
+          npm run build 2>&1 | tee ../evidence/build.log
+          git diff --check
+          cp -R dist ../evidence/dist
+      - name: Preserve dependency findings
+        if: always()
+        shell: bash
+        run: |
+          if test -d source/node_modules; then
+            cd source
+            npm audit --json > ../evidence/audit.json || true
+          fi
+      - name: Upload exact source and build for independent browser acceptance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pm-acc-ui-002
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
