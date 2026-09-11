@@ -1,0 +1,45 @@
+name: PM FAST-01 dependency cache only
+on:
+  push:
+    branches: [qa/acc-core-delivery-20260911]
+    paths: [.github/workflows/pm-fast01-dependency-cache.yml]
+permissions: {}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Download versioned runtime and prepare registry cache without app code
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence tools install
+          cd tools
+          curl --fail --location --max-time 90 -O https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz
+          curl --fail --location --max-time 30 -O https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+          grep ' node-v24.21.0-linux-x64.tar.xz$' SHASUMS256.txt | sha256sum --check
+          tar -xf node-v24.21.0-linux-x64.tar.xz
+          export PATH="$PWD/node-v24.21.0-linux-x64/bin:$PATH"
+          node --version | tee ../evidence/node-version.txt
+          npm --version | tee ../evidence/npm-version.txt
+          cp node-v24.21.0-linux-x64.tar.xz SHASUMS256.txt ../evidence/
+          cd ../install
+          cat > package.json <<'JSON'
+          {"name":"hbtc-copy-r1","private":true,"version":"0.1.0","type":"module","engines":{"node":">=24.21.0 <25","npm":">=11.19.0 <12"},"packageManager":"npm@11.19.0","dependencies":{"react":"19.1.1","react-dom":"19.1.1","viem":"2.56.3"},"devDependencies":{"@eslint/js":"9.35.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.12","@types/react-dom":"19.1.9","@vitejs/plugin-react":"5.0.2","eslint":"9.35.0","eslint-plugin-react-hooks":"5.2.0","eslint-plugin-react-refresh":"0.4.20","globals":"16.3.0","jsdom":"26.1.0","typescript":"5.9.2","typescript-eslint":"8.42.0","vite":"7.3.6","vitest":"4.1.11"}}
+          JSON
+          npm install --ignore-scripts --cache "$GITHUB_WORKSPACE/npm-cache" 2>&1 | tee ../evidence/registry-install.log
+          cp package.json package-lock.json ../evidence/
+          npm audit --json > ../evidence/generated-lock-audit.json || audit_code=$?
+          echo "${audit_code:-0}" > ../evidence/audit-exit.txt
+          cd ..
+          tar -czf evidence/npm-cache.tgz npm-cache
+          sha256sum evidence/* > evidence/hashes.txt
+          echo 'This run creates a registry cache only. Original delivered lock must pass offline npm ci independently. This is NOT candidate application CI.' > evidence/SCOPE.txt
+      - name: Export cache for independent local testing
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pm-fast01-dependency-cache
+          path: evidence/
+          retention-days: 2
+          if-no-files-found: error
