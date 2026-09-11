@@ -17,7 +17,7 @@ jobs:
       PATCH_BYTES: '36609'
       PATCH_SHA256: 91daefdd7e0a6894ca56fa9001819f86491a821a0e73c13480591bdf2600600b
     steps:
-      - name: Recover exact public patch without repository credentials
+      - name: Recover hash-proven patch while preserving raw transport evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +39,19 @@ jobs:
           out.joinpath('codex-comment.json').write_bytes(raw)
           pieces=re.findall(r'```diff\n(.*?)\n```',c['body'],re.S)
           assert len(pieces)==1
-          patch=(pieces[0]+'\n').encode()
+          patch=(pieces[0]+'\n').encode('utf-8')
+          raw_hash=hashlib.sha256(patch).hexdigest()
+          raw_len=len(patch)
+          out.joinpath('raw-transport.diff').write_bytes(patch)
+          restored=False
+          if raw_hash!=os.environ['PATCH_SHA256']:
+              assert raw_len==36615 and raw_hash=='857cb4bbefabc051ed889a733a2eb98591bf4a7a427cb7242534a57462aa0cfd'
+              before="return '合格但未\ufffd\ufffd\ufffd：同币数综合成本更高'"
+              after="return '合格但未选：同币数综合成本更高'"
+              text=patch.decode('utf-8')
+              assert text.count(before)==1
+              patch=text.replace(before,after).encode('utf-8')
+              restored=True
           assert len(patch)==int(os.environ['PATCH_BYTES'])
           assert hashlib.sha256(patch).hexdigest()==os.environ['PATCH_SHA256']
           text=patch.decode('utf-8')
@@ -65,7 +77,7 @@ jobs:
               src=pathlib.Path('source',path)
               assert not src.is_symlink()
               dest=out/'source'/path;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(src,dest)
-          out.joinpath('integrity.json').write_text(json.dumps({'base':os.environ['BASE'],'commentId':c['id'],'patchBytes':len(patch),'patchSha256':hashlib.sha256(patch).hexdigest(),'blobs':hashes},indent=2))
+          out.joinpath('integrity.json').write_text(json.dumps({'base':os.environ['BASE'],'commentId':c['id'],'rawPatchBytes':raw_len,'rawPatchSha256':raw_hash,'hashProvenEncodingRestoration':restored,'patchBytes':len(patch),'patchSha256':hashlib.sha256(patch).hexdigest(),'blobs':hashes},indent=2))
           print(out.joinpath('integrity.json').read_text())
           PY
       - name: Independently rerun developer suite and build
