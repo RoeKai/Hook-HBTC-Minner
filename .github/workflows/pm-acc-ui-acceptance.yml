@@ -13,9 +13,9 @@ jobs:
     timeout-minutes: 8
     env:
       BASE: d4072fd23924d1ccd842e3ddc166abc7c1463089
-      COMMENT_ID: '5627028113'
-      PATCH_BYTES: '27876'
-      PATCH_SHA256: 0d27d45bbb5b7bf4110befc3b53a95db7b2088a3d22cd8e5d0631c0a83dbc5ec
+      COMMENT_ID: '5627484619'
+      PATCH_BYTES: '36609'
+      PATCH_SHA256: 91daefdd7e0a6894ca56fa9001819f86491a821a0e73c13480591bdf2600600b
     steps:
       - name: Recover exact public patch without repository credentials
         shell: bash
@@ -26,6 +26,7 @@ jobs:
           git -C source fetch --depth=1 https://github.com/RoeKai/Hook-HBTC-Minner.git "$BASE"
           git -C source checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$BASE"
+          git -C source archive --format=zip --output="$GITHUB_WORKSPACE/evidence/base.zip" "$BASE"
           python3 - <<'PY'
           import urllib.request,json,re,os,hashlib,pathlib,subprocess,shutil
           out=pathlib.Path('evidence')
@@ -42,7 +43,7 @@ jobs:
           assert len(patch)==int(os.environ['PATCH_BYTES'])
           assert hashlib.sha256(patch).hexdigest()==os.environ['PATCH_SHA256']
           text=patch.decode('utf-8')
-          allowed={'src/App.tsx','src/components/AccumulationPreview.tsx','src/components/AccumulationPreview.test.tsx','src/components/AccumulationPreview.css','src/core/accumulation.ts','src/core/accumulation.test.ts','src/styles.css'}
+          allowed={'src/App.tsx','src/components/AccumulationPreview.tsx','src/components/AccumulationPreview.test.tsx','src/components/AccumulationPreview.css','src/core/accumulation.ts','src/core/accumulation.test.ts','src/core/accumulation-preview.ts','src/core/accumulation-preview.test.ts','src/styles.css'}
           names=re.findall(r'^diff --git a/(\S+) b/(\S+)$',text,re.M)
           assert names and len(names)==len(set(a for a,b in names))
           assert all(a==b and a in allowed for a,b in names)
@@ -92,7 +93,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pm-acc-ui-002
+          name: pm-acc-ui-fix-003
           path: evidence/
           retention-days: 14
           if-no-files-found: error
