@@ -1,6 +1,5 @@
-// PM-authored acceptance cases for ACC-M1-SIM-CORE-002.
-// Pending implementation: NOT run, NOT a passing test report.
-// Copy into src/core/pm-simulation.test.ts only in an isolated candidate worktree.
+// PM acceptance for ACC-M1-SIM-CORE-002. Pending implementation; NOT run, NOT PASS.
+// Copy to src/core/pm-simulation.test.ts in an isolated candidate worktree.
 import { describe, it, expect } from 'vitest';
 import {
   createSimulation, startSimulation, pauseSimulation, resumeSimulation, endSimulation,
@@ -19,6 +18,10 @@ const initial = (extra = {}) => startSimulation(createSimulation(conf(extra)));
 const pending = () => submitIntent(initial(), req());
 const confirmed = () => resolveIntent(pending(), 'i1', 'success', 70n);
 const mature = () => advanceRound(confirmed(), 0n);
+function attempt<T>(operation: () => T) {
+  try { return { ok: true as const, value: operation() }; }
+  catch (error) { return { ok: false as const, error }; }
+}
 function invariant(s: ReturnType<typeof createSimulation>) {
   const b = balances(s);
   expect(b.nvdaSpent + b.nvdaReserved + b.nvdaAvailable).toBe(s.config.nvdaBudget);
@@ -28,26 +31,26 @@ function invariant(s: ReturnType<typeof createSimulation>) {
   for (const value of Object.values(b)) expect(value >= 0).toBe(true);
 }
 
-describe('PM independent simulation conservation', () => {
-  it('reserves distinct currencies and service points before confirmation', () => {
+describe('PM simulation conservation', () => {
+  it('reserves distinct currencies and points before confirmation', () => {
     const s = pending(); invariant(s);
     expect(balances(s)).toMatchObject({nvdaSpent: 0n, nvdaReserved: 10_010n, nvdaAvailable: 89_990n,
       ethSpent: 0n, ethReserved: 240n, ethAvailable: 760n, pointsReserved: 1, pointsAvailable: 9,
       pointsSpent: 0, confirmedReward: 0n});
   });
-  it('success spends paid not budget, fees once, and reserves claim/exit gas', () => {
+  it('success spends paid, not budget, and retains claim/exit gas', () => {
     const s = confirmed(); invariant(s);
     expect(balances(s)).toMatchObject({nvdaSpent: 9_010n,nvdaReserved: 0n,nvdaAvailable: 90_990n,
       ethSpent: 70n,ethReserved: 140n,ethAvailable: 790n,pointsAvailable:9,pointsReserved:0,
       pointsSpent:1,confirmedReward:0n});
   });
-  it('failure spends only actual failure gas and generates no work rewards', () => {
+  it('failure spends only actual failure gas and generates no rewards', () => {
     let s = resolveIntent(pending(), 'i1', 'failed', 30n); invariant(s);
     expect(balances(s)).toMatchObject({nvdaSpent:0n,nvdaReserved:0n,ethSpent:30n,ethReserved:100n,
       pointsAvailable:10,pointsReserved:0,pointsSpent:0});
     s = advanceRound(s, 0n); invariant(s); expect(balances(s).confirmedReward).toBe(0n);
   });
-  it('UNKNOWN holds all reservations until original intent is resolved', () => {
+  it('UNKNOWN holds reservations until the original intent resolves', () => {
     const p = pending(); const u = markUnknown(p, 'i1'); invariant(u);
     expect(balances(u)).toEqual(balances(p));
     expect(() => advanceRound(u, 0n)).toThrow();
@@ -55,11 +58,11 @@ describe('PM independent simulation conservation', () => {
     const done = resolveIntent(u, 'i1', 'success',70n); invariant(done);
     expect(balances(done)).toEqual(balances(confirmed()));
   });
-  it('UNKNOWN can also resolve to failure without point or NVDA consumption', () => {
+  it('UNKNOWN may resolve to failure without point or NVDA consumption', () => {
     const s = resolveIntent(markUnknown(pending(),'i1'),'i1','failed',20n); invariant(s);
     expect(balances(s)).toMatchObject({nvdaSpent:0n,ethSpent:20n,pointsSpent:0,pointsReserved:0});
   });
-  it('two rounds mature once and claim moves existing rewards without inflation', () => {
+  it('two rounds mature once; claim moves existing rewards without inflation', () => {
     let s = mature(); const r1=rewardAt(emissionAt(144).scheduled,emissionAt(144).target,9_000n,0n);
     expect(balances(s).claimableReward).toBe(r1);
     s=submitIntent(s,req('i2'));s=resolveIntent(s,'i2','success',65n);s=advanceRound(s,20_000n);
@@ -69,90 +72,93 @@ describe('PM independent simulation conservation', () => {
     expect(balances(s)).toMatchObject({nvdaSpent:18_020n,ethSpent:225n,ethReserved:100n,
       pointsSpent:2,claimedReward:r1+r2,claimableReward:0n,confirmedReward:r1+r2});
   });
-  it('late final competition dilutes reward instead of locking preview result', () => {
+  it('late competition dilutes reward rather than locking the preview', () => {
     const low=advanceRound(confirmed(),0n);const high=advanceRound(confirmed(),10n**18n);
     expect(balances(high).confirmedReward).toBeLessThan(balances(low).confirmedReward);
     expect(balances(low).nvdaSpent).toBe(balances(high).nvdaSpent);
   });
-  it('no mature rewards cannot incur a claim charge or consume claim ID', () => {
+  it('no mature rewards cannot charge a fee or consume a claim ID', () => {
     const before=confirmed();const copy=structuredClone(before);
-    try {const after=claimRewards(before,'later',30n);expect(balances(after)).toEqual(balances(before));}
-    catch {expect(before).toEqual(copy);}
+    const result=attempt(() => claimRewards(before,'later',30n));
+    expect(before).toEqual(copy);
+    if(result.ok) expect(balances(result.value)).toEqual(balances(before));
     const after=claimRewards(advanceRound(before,0n),'later',30n);
     expect(balances(after).claimedReward).toBeGreaterThan(0n);
   });
 });
 
-describe('PM independent replay and lifecycle', () => {
-  it('repeated same submission is idempotent and conflicting payload rejected', () => {
+describe('PM replay and lifecycle', () => {
+  it('same submission is idempotent; conflicting payload is rejected', () => {
     const s=pending();const again=submitIntent(s,req());expect(again).toEqual(s);invariant(again);
     expect(() => submitIntent(s,req('i1',{candidates:[cand({gasWei:99n})]}))).toThrow();
     expect(() => submitIntent(s,req('new-id'))).toThrow();
   });
-  it('same resolution is idempotent, conflicting outcome or gas is rejected', () => {
+  it('same resolution is idempotent; conflicting outcome or gas is rejected', () => {
     const s=confirmed();expect(resolveIntent(s,'i1','success',70n)).toEqual(s);
     expect(() => resolveIntent(s,'i1','failed',70n)).toThrow();
     expect(() => resolveIntent(s,'i1','success',69n)).toThrow();
   });
-  it('same claim is idempotent and conflicting claim gas is rejected', () => {
+  it('same claim is idempotent; conflicting gas is rejected', () => {
     const s=claimRewards(mature(),'c1',20n);
     expect(claimRewards(s,'c1',20n)).toEqual(s);
     expect(() => claimRewards(s,'c1',21n)).toThrow();invariant(s);
   });
-  it('one-intent-per-round includes failed intents', () => {
+  it('one intent per round includes failed intents', () => {
     const s=resolveIntent(pending(),'i1','failed',0n);
     expect(() => submitIntent(s,req('i2'))).toThrow();
   });
-  it('pause stops new submission but lets pending result settle and claim mature rewards', () => {
+  it('pause stops new submissions but allows settlement and claims', () => {
     let s=pauseSimulation(pending());expect(s.status).toBe('PAUSED');
     expect(() => submitIntent(s,req('new'))).toThrow();
     s=resolveIntent(s,'i1','success',70n);s=advanceRound(s,0n);
     expect(s.status).toBe('PAUSED');s=claimRewards(s,'c1',20n);invariant(s);
     expect(resumeSimulation(s).status).toBe('RUNNING');
   });
-  it('end preserves pending obligations and does not prevent settlement or claim', () => {
+  it('end preserves obligations and permits settlement and claims', () => {
     let s=endSimulation(pending());expect(s.status).toBe('ENDED');invariant(s);
     expect(balances(s).nvdaReserved).toBe(10_010n);
     expect(() => submitIntent(s,req('new'))).toThrow();
     s=resolveIntent(s,'i1','success',70n);s=advanceRound(s,0n);s=claimRewards(s,'c1',20n);
     invariant(s);expect(s.status).toBe('ENDED');expect(balances(s).claimedReward).toBeGreaterThan(0n);
   });
-  it('three elapsed rounds end the finite plan rather than granting three extra attempts', () => {
+  it('three elapsed rounds end the plan, without extra attempts', () => {
     let s=initial(); for(let i=0;i<3;i++){s=advanceRound(s,0n);invariant(s);}
     expect(s.round).toBe(147);expect(s.status).toBe('ENDED');
     expect(() => submitIntent(s,req('late'))).toThrow();
   });
-  it('matured original intent is not matured again by another advance', () => {
+  it('advancing again never matures the same intent twice', () => {
     const s=mature();expect(balances(advanceRound(s,0n)).confirmedReward).toBe(balances(s).confirmedReward);
     expect(s.intents[0].originalRound).toBe(144);
   });
-  it('WAIT decisions have no intent, cash, point, or reward charge', () => {
+  it('WAIT creates no intent or charge', () => {
     const s=initial();const wait=submitIntent(s,req('waiting',{fx:null}));
     expect(wait.lastDecision?.action).toBe('WAIT');expect(wait.intents).toHaveLength(0);
     expect(balances(wait)).toEqual(balances(s));
   });
-  it('SKIP on unit cost leaves balances and points unchanged', () => {
+  it('SKIP on unit cost leaves balances unchanged', () => {
     const s=initial({costPerThousandCap:1n});const skip=submitIntent(s,req());
     expect(skip.lastDecision?.action).toBe('SKIP');expect(skip.intents).toHaveLength(0);
     expect(balances(skip)).toEqual(balances(s));
   });
 });
 
-describe('PM independent budget and hostile input checks', () => {
-  it('exact balance boundary is allowed, one raw short never creates a pending intent', () => {
+describe('PM budget and malformed inputs', () => {
+  it('exact budgets pass; one raw short never creates a pending intent', () => {
     const exact=submitIntent(initial({nvdaBudget:10_010n,ethBudget:240n}),req());invariant(exact);
     expect(exact.intents).toHaveLength(1);
     for(const delta of [{nvdaBudget:10_009n},{ethBudget:239n}]) {
       const s=initial({nvdaBudget:10_010n,ethBudget:240n,...delta});const copy=structuredClone(s);
-      try{const r=submitIntent(s,req());expect(r.intents).toHaveLength(0);invariant(r);}catch{expect(s).toEqual(copy);}
+      const result=attempt(() => submitIntent(s,req()));
+      expect(s).toEqual(copy);
+      if(result.ok){expect(result.value.intents).toHaveLength(0);invariant(result.value);}
     }
   });
-  it('gas above reservation cannot settle, mutate input, or create a negative balance', () => {
+  it('gas above reservation cannot settle or mutate input', () => {
     const s=pending();const before=structuredClone(s);
     expect(()=>resolveIntent(s,'i1','success',101n)).toThrow();
     expect(()=>resolveIntent(s,'i1','failed',101n)).toThrow();expect(s).toEqual(before);invariant(s);
   });
-  it('claim can release own reserve but cannot consume exit reserve', () => {
+  it('claim releases its own reserve but cannot consume the exit reserve', () => {
     let s=submitIntent(initial({nvdaBudget:10_010n,ethBudget:240n}),req());
     s=resolveIntent(s,'i1','success',70n);s=advanceRound(s,0n);
     expect(()=>claimRewards(s,'over',71n)).toThrow();
@@ -162,34 +168,34 @@ describe('PM independent budget and hostile input checks', () => {
   it.each([0,4,1.5,NaN,Infinity])('rejects invalid maxRounds %s', (maxRounds)=>{
     expect(()=>createSimulation(conf({maxRounds}))).toThrow();
   });
-  it.each([null,undefined,1,'1',-1n])('rejects non-bigint or negative initial NVDA %s', (nvdaBudget)=>{
+  it.each([null,undefined,1,'1',-1n])('rejects invalid initial NVDA %s', (nvdaBudget)=>{
     expect(()=>createSimulation(conf({nvdaBudget}))).toThrow();
   });
-  it('rejects impossible initial exit reserve',()=>{
+  it('rejects an impossible initial exit reserve',()=>{
     expect(()=>createSimulation(conf({ethBudget:99n,ethExitReserve:100n}))).toThrow();
   });
-  it('rejects sparse/null/undefined scenarios and candidates before creating any intent',()=>{
+  it('rejects sparse, null or undefined input entries before creating an intent',()=>{
     for(const extra of [
       {otherWorkScenarios:new Array(1)}, {otherWorkScenarios:[0n,undefined]},
       {otherWorkScenarios:[null]}, {candidates:new Array(1)}, {candidates:[undefined]},
     ]) {const s=initial();const before=structuredClone(s);
       expect(()=>submitIntent(s,req('invalid',extra))).toThrow();expect(s).toEqual(before);}
   });
-  it('rejects non-bigint gas and final Work and unknown outcomes',()=>{
+  it('rejects non-bigint gas, final Work and unknown outcomes',()=>{
     const s=pending();
     expect(()=>resolveIntent(s,'i1','success',1 as unknown as bigint)).toThrow();
     expect(()=>resolveIntent(s,'i1','succeeded' as 'success',70n)).toThrow();
     expect(()=>advanceRound(confirmed(),1 as unknown as bigint)).toThrow();
     expect(()=>claimRewards(mature(),'c1',-1n)).toThrow();
   });
-  it('snapshots caller-owned configuration and intent candidates',()=>{
+  it('snapshots caller-owned configuration and candidates',()=>{
     const c=conf();const s=createSimulation(c);c.nvdaBudget=0n;
     expect(s.config.nvdaBudget).toBe(100_000n);
     const q=req();const submitted=submitIntent(startSimulation(s),q);q.candidates[0].paid=0n;
     const result=resolveIntent(submitted,'i1','success',70n);
     expect(balances(result).nvdaSpent).toBe(9_010n);invariant(result);
   });
-  it('all normal operations leave their input state intact',()=>{
+  it('normal operations leave their input state unchanged',()=>{
     const a=initial();const ac=structuredClone(a);const b=submitIntent(a,req());expect(a).toEqual(ac);
     const bc=structuredClone(b);const c=resolveIntent(b,'i1','success',70n);expect(b).toEqual(bc);
     const cc=structuredClone(c);const d=advanceRound(c,0n);expect(c).toEqual(cc);
