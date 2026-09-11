@@ -1,0 +1,35 @@
+name: PM simulation review dependencies
+on:
+  push:
+    branches: [qa/acc-core-delivery-20260911]
+    paths: [.github/workflows/pm-sim-local-dependencies.yml]
+permissions: {}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Read fixed public application baseline without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source fetch --depth=1 https://github.com/RoeKai/Hook-HBTC-Minner.git 9927de2282b2dd6fcef65b3ae13dad79b820ffec
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = 9927de2282b2dd6fcef65b3ae13dad79b820ffec
+          mkdir evidence
+          cd source
+          sha256sum package.json package-lock.json > ../evidence/lock-sha256.txt
+          node --version > ../evidence/node-version.txt
+          npm --version > ../evidence/npm-version.txt
+          npm ci --ignore-scripts --no-fund 2>&1 | tee ../evidence/install.log
+          tar -czf ../evidence/node-modules-linux.tgz node_modules
+          sha256sum ../evidence/node-modules-linux.tgz > ../evidence/dependencies-sha256.txt
+          npm audit --json > ../evidence/audit.json || true
+      - name: Export only pinned dependencies and installation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pm-sim-local-dependencies
+          path: evidence/
+          retention-days: 2
+          if-no-files-found: error
