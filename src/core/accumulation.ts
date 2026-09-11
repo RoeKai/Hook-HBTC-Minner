@@ -57,6 +57,14 @@ export interface Decision {
   assumptions: string[];
 }
 
+export function explainUnselected(candidate: EvaluatedCandidate, selected: EvaluatedCandidate): string {
+  if (!candidate.accepted) return candidate.reason;
+  if (candidate.rewardLow < selected.rewardLow) return '合格但未选：保守新增币数较少';
+  if (candidate.costNvda! > selected.costNvda!) return '合格但未选：同币数综合成本更高';
+  if (candidate.budget > selected.budget) return '合格但未选：同币数同成本但预算更高';
+  return '合格但未选：稳定 ID 平局排序靠后';
+}
+
 const assumptions = [
   '竞争值来自离散情景，不是奖励保证。',
   '预算是支出上限，不要求全部用完。',
@@ -106,8 +114,12 @@ export function marginalRewards(
   amount(own, 'own');
   amount(added, 'added');
   if (!Array.isArray(others) || others.length === 0 || others.length > 32) throw new TypeError('竞争情景数量必须为1至32');
-  others.forEach((value, index) => amount(value, `others[${index}]`));
-  const values = others.map((other) => rewardAt(scheduled, target, own + added, other) - rewardAt(scheduled, target, own, other));
+  const values: bigint[] = [];
+  for (let index = 0; index < others.length; index += 1) {
+    const other = others[index];
+    amount(other, `others[${index}]`);
+    values.push(rewardAt(scheduled, target, own + added, other) - rewardAt(scheduled, target, own, other));
+  }
   let low = values[0]!;
   let high = values[0]!;
   for (const value of values.slice(1)) {
@@ -123,20 +135,23 @@ function validateInput(input: DecisionInput): void {
   safeInteger(input.now, 'now');
   const fields = ['ownWork', 'nvdaAvailable', 'ethAvailable', 'perRoundCap', 'dailyRemaining', 'nvdaReserved',
     'ethReserved', 'nvdaFeeReserve', 'ethExitReserve', 'costPerThousandCap'] as const;
-  fields.forEach((field) => amount(input[field], field));
+  for (const field of fields) amount(input[field], field);
   if (!Array.isArray(input.otherWorkScenarios) || input.otherWorkScenarios.length === 0 || input.otherWorkScenarios.length > 32) {
     throw new TypeError('竞争情景数量必须为1至32');
   }
-  input.otherWorkScenarios.forEach((value, index) => amount(value, `otherWorkScenarios[${index}]`));
+  for (let index = 0; index < input.otherWorkScenarios.length; index += 1) {
+    amount(input.otherWorkScenarios[index], `otherWorkScenarios[${index}]`);
+  }
   if (!Array.isArray(input.candidates) || input.candidates.length > 64) throw new TypeError('候选数组最多64项');
   const ids = new Set<string>();
-  input.candidates.forEach((candidate, index) => {
+  for (let index = 0; index < input.candidates.length; index += 1) {
+    const candidate = input.candidates[index];
     record(candidate, `candidates[${index}]`);
     if (typeof candidate.id !== 'string' || candidate.id.trim() === '' || ids.has(candidate.id)) throw new TypeError('候选ID必须非空且唯一');
     ids.add(candidate.id);
     const candidateFields = ['budget', 'paid', 'refund', 'work', 'gasWei', 'claimGasWei', 'serviceCostNvda'] as const;
-    candidateFields.forEach((field) => amount(candidate[field], `candidates[${index}].${field}`));
-  });
+    for (const field of candidateFields) amount(candidate[field], `candidates[${index}].${field}`);
+  }
   if (input.fx !== null) {
     record(input.fx, 'fx');
     amount(input.fx.numerator, 'fx.numerator');
@@ -202,6 +217,6 @@ export function selectCandidate(input: DecisionInput): Decision {
       selected = candidate;
     }
   }
-  if (selected === null) return { action: 'SKIP', reason: input.candidates.length === 0 ? '没有候选方案' : '没有符合预算与正收益要求的候选', selected: null, candidates: evaluated, assumptions: [...assumptions] };
+  if (selected === null) return { action: 'SKIP', reason: input.candidates.length === 0 ? '没有候选方案' : '没有符合预算与正新增获币量要求的候选', selected: null, candidates: evaluated, assumptions: [...assumptions] };
   return { action: 'PARTICIPATE', reason: '选择保守新增奖励最多的合格候选', selected, candidates: evaluated, assumptions: [...assumptions] };
 }

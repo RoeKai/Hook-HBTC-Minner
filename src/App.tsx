@@ -5,6 +5,7 @@ import { targetManifest, transactionGate } from './core/manifest';
 import type { ProtocolSnapshot } from './core/protocol';
 import { transition, validateStrategy, type StrategyConfig, type StrategyState } from './core/strategy';
 import { connectWallet, type Eip1193Provider } from './core/wallet';
+import AccumulationPreview from './components/AccumulationPreview';
 import './styles.css';
 
 declare global { interface Window { ethereum?: Eip1193Provider } }
@@ -26,6 +27,7 @@ export default function App(){
   <header><div><p className="eyebrow">HBTC COPY / R1 CONSOLE</p><h1>Read-only mining cockpit</h1><p className="subtitle">Explore protocol telemetry and rehearse a bounded strategy without signing or sending transactions.</p></div><div className="wallet"><span className="status">● Simulation / Read-only</span>{wallet?<><b>{short(wallet.account)}</b><small>Chain {wallet.chainId} · session only</small><button onClick={()=>{setWallet(null);setSnapshot(null);setNotice('Disconnected; account-derived data cleared.')}}>Disconnect</button></>:<button className="primary" onClick={connect}>Connect wallet</button>}</div></header>
   {walletError&&<div className="alert" role="alert">⚠ {walletError}</div>}
   <section className="safety"><b>Safety lock active</b><span>G0 BLOCKED · live configuration is empty · wallet connection is not automation authorization.</span><button disabled title={gate.reasons.join('; ')}>Live actions locked</button></section>
+  <AccumulationPreview />
   <div className="layout"><section><div className="section-title"><div><p className="eyebrow">PROTOCOL PULSE</p><h2>Cycle #1,842</h2></div><span className="fresh">● Fresh simulation</span></div><div className="cycle"><div className="ring"><b>{snapshot?.progressBps.value!==null?`${(snapshot?.progressBps.value??0)/100}%`:'—'}</b><span>cycle progress</span></div><div><span>Execution window</span><strong>01:30 → 02:15</strong><small>3m 37s remaining · mock clock</small></div></div>
   <h3>Rewards · distinct accounting</h3><div className="grid rewards">{metric('Projected reward',formatAmount(snapshot?.projectedReward.value??null))}{metric('Claimable reward',formatAmount(snapshot?.claimableReward.value??null))}{metric('Already claimed',formatAmount(snapshot?.claimedReward.value??null))}{metric('Token from buys',formatAmount(snapshot?.purchasedToken.value??null))}</div>
   <h3>Work, balances & costs</h3><div className="grid">{metric('Your work',snapshot?.userWork.value?.toLocaleString()??'Unknown')}{metric('Network work',snapshot?.totalWork.value?.toLocaleString()??'Unknown')}{metric('Wallet balance',formatAmount(snapshot?.nativeBalance.value??null))}{metric('Token balance',formatAmount(snapshot?.tokenBalance.value??null))}{metric('Protocol toll / fee',formatAmount(snapshot?.toll.value??null))}{metric('Principal spent',formatAmount(snapshot?.principalSpent.value??null))}{metric('Gas spent',formatAmount(snapshot?.gasSpent.value??null))}{metric('Service runs left','8 runs','Local simulation')}</div></section>

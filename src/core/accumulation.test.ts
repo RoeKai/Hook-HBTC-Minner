@@ -74,6 +74,13 @@ describe('BTCNVDA emission and reward math', () => {
     expect(() => marginalRewards(1n, 1n, 1n, 1n, [])).toThrow(/1至32/);
     expect(() => marginalRewards(1n, 1n, 1n, 1n, Array(33).fill(0n))).toThrow(/1至32/);
   });
+
+  it('rejects sparse competition arrays at the first or trailing slot', () => {
+    expect(() => marginalRewards(1000n, 100n, 0n, 10n, new Array(1))).toThrow(/others\[0\]/);
+    const trailing = [0n];
+    trailing.length = 2;
+    expect(() => marginalRewards(1000n, 100n, 0n, 10n, trailing)).toThrow(/others\[1\]/);
+  });
 });
 
 describe('accumulation candidate selection', () => {
@@ -159,6 +166,15 @@ describe('accumulation candidate selection', () => {
     selectCandidate(original);
     expect(original).toEqual(snapshot);
     expect(Object.prototype.hasOwnProperty.call(original.candidates[0], 'accepted')).toBe(false);
+  });
+
+  it('rejects sparse scenario and candidate arrays', () => {
+    const scenarios = [0n];
+    scenarios.length = 2;
+    expect(() => selectCandidate(input({ otherWorkScenarios: scenarios }))).toThrow(/otherWorkScenarios\[1\]/);
+    const candidates = [candidate()];
+    candidates.length = 2;
+    expect(() => selectCandidate(input({ candidates }))).toThrow(/candidates\[1\]/);
   });
 });
 
